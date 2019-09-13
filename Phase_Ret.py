@@ -133,7 +133,8 @@ parser.add_argument('-t1', type=str,default = 'ar',help='Telescope 1')
 parser.add_argument('-t2', type=str,default = 'gb',help='Telescope 2')
 parser.add_argument('-bff', type=int,default = 128,help='Number of Frequency Chunks')
 parser.add_argument('-bft', type=int,default = 22,help='Number of Time Chunks')
-parser.add_argument('-svd',action='store_false',default=True,help='Add this if the Data has already had (or does not need) an SVD')
+parser.add_argument('-svdv',action='store_true',default=False,help='Add this if the Visibility has already had (or does not need) an SVD')
+parser.add_argument('-svdi',action='store_true',default=False,help='Add this if the Intensity has already had (or does not need) an SVD')
 parser.add_argument('-T',action='store_false',default=True,help='Add this if Data is already in the form [freq,time]')
 parser.add_argument('-s1', action='store_true',default = False, help='Skip 1st Visibility Filter')
 parser.add_argument('-si', action='store_true',default = False, help='Skip Intensity Filter')
@@ -204,15 +205,25 @@ if rank>0:
 
 	GBAR[:,Vmsk==0]=GBAR[:,Vmsk==1].mean()
 	##Run SVD on Visibility if requested
-	if args.svd:
+	if args.svdv:
 		if rank==1:
 			print('Performing SVD on Visibility',flush=True)
-		GBAR_svd=svd_model(GBAR, nmodes=2)
+		svd=svd_model(GBAR, nmodes=1)
+		GBAR/=svd
+		GBAR[:,Vmsk==0]=0
+	if args.svdi:
+		if rank==1:
+			print('Performing SVD on Intensity',flush=True)
+		svd=svd_model(ARAR, nmodes=1)
+		ARAR/=svd.real
+		ARAR[:,Vmsk==0]=0
 
+	
 		# GBAR*=np.exp(-1j*np.angle(GBAR_svd))
-		# GBAR*=Vmsk
+		#GBAR*=Vmsk
 
-		GBAR/=GBAR_svd
+		
+		
 
 	##Setup pyFFTW
 	if rank==1:
@@ -363,7 +374,7 @@ if not args.si:
 		if i==0:
 			f_start=0
 			f_stop=f_start + nf2 + nf2//4
-		elif (i+1)*nf2==GBAR.shape[0]:
+		elif (i+1)*nf2 + nf2//8>=ARAR.shape[0]:
 			f_stop=(i+1)*nf2
 			f_start=f_stop - nf2 - nf2//4
 		else:
@@ -373,7 +384,7 @@ if not args.si:
 		if j==0:
 			t_start=0
 			t_stop=t_start + nt2 + nt2//4
-		elif (j+1)*nt2==GBAR.shape[1]:
+		elif (j+1)*nt2+nt2//8>=ARAR.shape[1]:
 			t_stop=(j+1)*nt2
 			t_start=t_stop - nt2 - nt2//4
 		else:
@@ -388,7 +399,7 @@ if not args.si:
 		err = np.reshape(
 			np.diag(Smat - 2*((Smat * H) @ np.conjugate(L.T))+L @ ((Smat * H)*H[:,np.newaxis] + np.diag(N*(100-99*H)))@ np.conjugate(L.T)),
 			(nf2 + nf2//4,nt2 + nt2//4))[i*nf2-f_start:(i+1)*nf2-f_start,j*nt2-t_start:(j+1)*nt2-t_start]
-		print('Rank %s: %s' %(rank,MPI.Wtime()-ts),flush=True)
+		print('Rank %s (%s,%s): %s' %(rank,i,j,MPI.Wtime()-ts),flush=True)
 		return(i,j,filt,err)
 
 	comm.Barrier()
@@ -485,7 +496,7 @@ def V_filter(args):
 	if i==0:
 		f_start=0
 		f_stop=f_start + nf2 + nf2//4
-	elif (i+1)*nf2==GBAR.shape[0]:
+	elif (i+1)*nf2+nf2//8>=GBAR.shape[0]:
 		f_stop=(i+1)*nf2
 		f_start=f_stop - nf2 - nf2//4
 	else:
@@ -495,7 +506,7 @@ def V_filter(args):
 	if j==0:
 		t_start=0
 		t_stop=t_start + nt2 + nt2//4
-	elif (j+1)*nt2==GBAR.shape[1]:
+	elif (j+1)*nt2+nt2//8>=GBAR.shape[1]:
 		t_stop=(j+1)*nt2
 		t_start=t_stop - nt2 - nt2//4
 	else:
@@ -602,10 +613,14 @@ if rank>=1:
 		np.linspace(0, nt2 - 1 + nt2//4, nt2 + nt2//4).astype(int)[np.newaxis, np.newaxis, np.newaxis, :]].real
 	#Smat=np.reshape(Smat,(nt2*nf2,nt2*nf2))-np.diag(N*np.ones(nt2*nf2))
 	Smat=np.reshape(Smat,((nf2 + nf2//4)*(nt2 + nt2//4),(nf2 + nf2//4)*(nt2 + nt2//4)))
+	##Var Limited
 	amps=np.linspace(np.abs(V_filt).min(),np.abs(V_filt).max(),10000)
 	var=np.angle((np.random.normal(0,1,(10000,10000))+1j*np.random.normal(0,1,(10000,10000)))*np.sqrt(N_filt/2)+amps).var(0)
-	var[amps<np.sqrt(N_filt/2)]=100*np.pi
-	var_interp=interp1d(amps,var,fill_value=100*np.pi)
+	var[var<1e-1]=1e-1
+	##Var Unlimited
+	#amps=np.linspace(2*np.sqrt(N_filt/2),np.abs(V_filt).max(),10000)
+	#var=np.angle((np.random.normal(0,1,(10000,10000))+1j*np.random.normal(0,1,(10000,10000)))*np.sqrt(N_filt/2)+amps).var(0)
+	var_interp=interp1d(amps,var,fill_value=10*np.pi,bounds_error=False)
 def phase_filter(args):
 	global V_filt
 	global Smat
@@ -618,7 +633,7 @@ def phase_filter(args):
 	if i==0:
 		f_start=0
 		f_stop=f_start + nf2 + nf2//4
-	elif (i+1)*nf2==V_filt.shape[0]:
+	elif (i+1)*nf2+nf2//8>=V_filt.shape[0]:
 		f_stop=(i+1)*nf2
 		f_start=f_stop - nf2 - nf2//4
 	else:
@@ -628,7 +643,7 @@ def phase_filter(args):
 	if j==0:
 		t_start=0
 		t_stop=t_start + nt2 + nt2//4
-	elif (j+1)*nt2==V_filt.shape[1]:
+	elif (j+1)*nt2+nt2//8>=V_filt.shape[1]:
 		t_stop=(j+1)*nt2
 		t_start=t_stop - nt2 - nt2//4
 	else:
